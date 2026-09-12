@@ -1,0 +1,8 @@
+[package]
+name = "icalfmt"
+version = "0.1.0"
+edition = "2021"
+description = "Strict-by-default iCalendar parser and pretty printer"
+license = "MIT"
+
+[dependencies]
