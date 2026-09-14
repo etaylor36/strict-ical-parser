@@ -30,6 +30,11 @@ tool silently guessing what you meant.
   become warnings instead of errors. Structural corruption (an `END` with no
   matching `BEGIN`, a property outside any component, an unclosed component)
   still fails in both modes — there's no sane way to guess past that.
+- Validates the `\\`, `\;`, `\,`, `\n`/`\N` escaping used inside `TEXT`-typed
+  properties (`SUMMARY`, `DESCRIPTION`, `UID`, `CATEGORIES`, ...). A stray
+  backslash followed by anything else is a strict-mode error and a
+  lenient-mode warning. `src/text.rs` also exposes `unescape`/`escape` for
+  decoding a value to its literal form and back.
 - Pretty-prints the parsed result: uppercases component and parameter names,
   normalizes line endings to `CRLF`, and re-folds long lines at 75 octets.
 
@@ -85,17 +90,18 @@ output.
 ## Current scope
 
 This is an early skeleton. It handles structural parsing (folding,
-`BEGIN`/`END` nesting, parameters, `VCALENDAR`-level requirements) correctly,
-but it does not yet validate property value types (`DATE-TIME`, `DURATION`,
-`RRULE`, ...), does not resolve `TZID` references against `VTIMEZONE`
-blocks, and does not decode/encode the `\n`/`\,`/`\;` escaping used inside
-`TEXT` values — property values pass through as raw text. See the roadmap
-below.
+`BEGIN`/`END` nesting, parameters, `VCALENDAR`-level requirements) and
+`TEXT` escape validation correctly, but it does not yet validate property
+value types (`DATE-TIME`, `DURATION`, `RRULE`, ...), does not resolve `TZID`
+references against `VTIMEZONE` blocks, and the pretty printer passes
+property values through unchanged rather than round-tripping them through
+`text::unescape`/`text::escape`.
 
 ## Layout
 
 - `src/parser.rs` — unfolding, content-line tokenizing, tree building,
   validation.
+- `src/text.rs` — RFC 5545 TEXT escaping (`unescape`/`escape`).
 - `src/writer.rs` — pretty printing and re-folding.
 - `src/lib.rs` — the shared `Component`/`ContentLine`/`Diagnostic` types.
 - `src/main.rs` — CLI glue.

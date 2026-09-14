@@ -1,4 +1,5 @@
 pub mod parser;
+pub mod text;
 pub mod writer;
 
 /// A single parameter attached to a property, e.g. `TZID=America/Chicago` in

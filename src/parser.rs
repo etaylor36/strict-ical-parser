@@ -292,4 +292,54 @@ fn validate(tree: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) 
             message: "VCALENDAR has no sub components such as VEVENT or VTODO".to_string(),
         });
     }
+
+    validate_text_escaping(tree, lenient, diagnostics);
+}
+
+// Properties whose value type is TEXT per RFC 5545 §3.8, i.e. the ones where
+// `\\`, `\;`, `\,` and `\n`/`\N` escaping applies. This isn't every TEXT
+// property in the spec, just the ones likely to show up in real files.
+const TEXT_PROPERTIES: &[&str] = &[
+    "ACTION",
+    "CATEGORIES",
+    "CLASS",
+    "COMMENT",
+    "CONTACT",
+    "DESCRIPTION",
+    "LOCATION",
+    "PRODID",
+    "RELATED-TO",
+    "REQUEST-STATUS",
+    "RESOURCES",
+    "STATUS",
+    "SUMMARY",
+    "TRANSP",
+    "TZID",
+    "TZNAME",
+    "UID",
+];
+
+fn validate_text_escaping(component: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
+    let severity = if lenient { Severity::Warning } else { Severity::Error };
+
+    for prop in &component.properties {
+        let is_text = TEXT_PROPERTIES.iter().any(|name| prop.name.eq_ignore_ascii_case(name));
+        if !is_text {
+            continue;
+        }
+        if let Err(offset) = crate::text::unescape(&prop.value) {
+            diagnostics.push(Diagnostic {
+                severity,
+                line: prop.source_line,
+                message: format!(
+                    "property {} has an invalid escape sequence at offset {offset}, only \\\\, \\;, \\, \\n and \\N are valid",
+                    prop.name
+                ),
+            });
+        }
+    }
+
+    for child in &component.children {
+        validate_text_escaping(child, lenient, diagnostics);
+    }
 }
