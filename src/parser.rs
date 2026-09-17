@@ -31,7 +31,7 @@ pub fn parse(input: &str, lenient: bool) -> Result<crate::ParseOutcome, Vec<Diag
         return Err(diagnostics);
     }
 
-    let tree = match build_tree(content_lines, lenient, &mut diagnostics) {
+    let mut tree = match build_tree(content_lines, lenient, &mut diagnostics) {
         Ok(tree) => tree,
         Err(message) => {
             diagnostics.push(Diagnostic {
@@ -43,7 +43,7 @@ pub fn parse(input: &str, lenient: bool) -> Result<crate::ParseOutcome, Vec<Diag
         }
     };
 
-    validate(&tree, lenient, &mut diagnostics);
+    validate(&mut tree, lenient, &mut diagnostics);
 
     if !lenient && diagnostics.iter().any(|d| d.severity == Severity::Error) {
         return Err(diagnostics);
@@ -258,7 +258,7 @@ fn build_tree(
     root.ok_or_else(|| "input contained no top level component".to_string())
 }
 
-fn validate(tree: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
+fn validate(tree: &mut Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
     let severity = if lenient { Severity::Warning } else { Severity::Error };
 
     if !tree.name.eq_ignore_ascii_case("VCALENDAR") {
@@ -293,53 +293,84 @@ fn validate(tree: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) 
         });
     }
 
-    validate_text_escaping(tree, lenient, diagnostics);
+    decode_text_properties(tree, lenient, diagnostics);
 }
 
-// Properties whose value type is TEXT per RFC 5545 §3.8, i.e. the ones where
-// `\\`, `\;`, `\,` and `\n`/`\N` escaping applies. This isn't every TEXT
-// property in the spec, just the ones likely to show up in real files.
-const TEXT_PROPERTIES: &[&str] = &[
-    "ACTION",
-    "CATEGORIES",
-    "CLASS",
-    "COMMENT",
-    "CONTACT",
-    "DESCRIPTION",
-    "LOCATION",
-    "PRODID",
-    "RELATED-TO",
-    "REQUEST-STATUS",
-    "RESOURCES",
-    "STATUS",
-    "SUMMARY",
-    "TRANSP",
-    "TZID",
-    "TZNAME",
-    "UID",
-];
-
-fn validate_text_escaping(component: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
+// Decode each TEXT property's value in place, from its RFC 5545 §3.3.11
+// escaped form on the wire to the literal text it represents. The writer
+// re-escapes from this literal form rather than ever touching the raw bytes
+// that were read from the source, so the escaping logic has exactly one
+// place it can drift from the spec.
+fn decode_text_properties(component: &mut Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
     let severity = if lenient { Severity::Warning } else { Severity::Error };
 
-    for prop in &component.properties {
-        let is_text = TEXT_PROPERTIES.iter().any(|name| prop.name.eq_ignore_ascii_case(name));
+    for prop in &mut component.properties {
+        let is_text = crate::text::TEXT_PROPERTIES
+            .iter()
+            .any(|name| prop.name.eq_ignore_ascii_case(name));
         if !is_text {
             continue;
         }
-        if let Err(offset) = crate::text::unescape(&prop.value) {
-            diagnostics.push(Diagnostic {
+        match crate::text::unescape(&prop.value) {
+            Ok(decoded) => prop.value = decoded,
+            Err(offset) => diagnostics.push(Diagnostic {
                 severity,
                 line: prop.source_line,
                 message: format!(
                     "property {} has an invalid escape sequence at offset {offset}, only \\\\, \\;, \\, \\n and \\N are valid",
                     prop.name
                 ),
-            });
+            }),
         }
     }
 
-    for child in &component.children {
-        validate_text_escaping(child, lenient, diagnostics);
+    for child in &mut component.children {
+        decode_text_properties(child, lenient, diagnostics);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_ok(input: &str) -> crate::ParseOutcome {
+        parse(input, false).expect("expected input to parse")
+    }
+
+    #[test]
+    fn text_property_values_are_stored_decoded() {
+        let outcome = parse_ok(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nSUMMARY:Team\\, standup\\; room 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let event = &outcome.calendar.children[0];
+        assert_eq!(event.property("SUMMARY").unwrap().value, "Team, standup; room 4");
+    }
+
+    #[test]
+    fn writer_round_trips_decoded_text_through_escaping() {
+        let outcome = parse_ok(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nSUMMARY:Team\\, standup\\; room 4\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let printed = crate::writer::print(&outcome.calendar);
+        assert!(printed.contains("SUMMARY:Team\\, standup\\; room 4"));
+    }
+
+    #[test]
+    fn writer_normalizes_uppercase_n_newline_escape_to_lowercase() {
+        let outcome = parse_ok(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDESCRIPTION:line1\\Nline2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let printed = crate::writer::print(&outcome.calendar);
+        assert!(printed.contains("DESCRIPTION:line1\\nline2"));
+    }
+
+    #[test]
+    fn invalid_text_escape_is_reported_and_left_undecoded() {
+        let diagnostics = parse(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nSUMMARY:bad\\xvalue\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(diagnostics.iter().any(|d| d.message.contains("invalid escape sequence")));
     }
 }

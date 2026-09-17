@@ -2,6 +2,29 @@
 //! `\,`, and `\n`/`\N` for a literal newline. Nothing else after a backslash
 //! is valid.
 
+/// Properties whose value type is TEXT per RFC 5545 §3.8, i.e. the ones where
+/// `\\`, `\;`, `\,` and `\n`/`\N` escaping applies. This isn't every TEXT
+/// property in the spec, just the ones likely to show up in real files.
+pub const TEXT_PROPERTIES: &[&str] = &[
+    "ACTION",
+    "CATEGORIES",
+    "CLASS",
+    "COMMENT",
+    "CONTACT",
+    "DESCRIPTION",
+    "LOCATION",
+    "PRODID",
+    "RELATED-TO",
+    "REQUEST-STATUS",
+    "RESOURCES",
+    "STATUS",
+    "SUMMARY",
+    "TRANSP",
+    "TZID",
+    "TZNAME",
+    "UID",
+];
+
 /// Decode an escaped TEXT property value into the literal characters it
 /// represents. Returns the byte offset of the backslash on the first escape
 /// sequence that isn't `\\`, `\;`, `\,`, `\n`, or `\N`.

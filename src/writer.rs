@@ -1,3 +1,4 @@
+use crate::text;
 use crate::{Component, ContentLine};
 
 /// Render a component tree back into RFC 5545 text: uppercase component and
@@ -29,7 +30,12 @@ fn render_property(prop: &ContentLine) -> String {
         line.push_str(&rendered.join(","));
     }
     line.push(':');
-    line.push_str(&prop.value);
+    let is_text = text::TEXT_PROPERTIES.iter().any(|name| prop.name.eq_ignore_ascii_case(name));
+    if is_text {
+        line.push_str(&text::escape(&prop.value));
+    } else {
+        line.push_str(&prop.value);
+    }
     line
 }
 
