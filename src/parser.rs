@@ -294,6 +294,77 @@ fn validate(tree: &mut Component, lenient: bool, diagnostics: &mut Vec<Diagnosti
     }
 
     decode_text_properties(tree, lenient, diagnostics);
+    validate_value_types(tree, lenient, diagnostics);
+}
+
+// Properties whose value is always DATE-TIME, never plain DATE, regardless
+// of any VALUE parameter (RFC 5545 §3.8.7).
+const DATE_TIME_ONLY_PROPERTIES: &[&str] = &["DTSTAMP", "CREATED", "LAST-MODIFIED"];
+
+// Properties that default to DATE-TIME but switch to DATE when tagged with
+// `;VALUE=DATE` (RFC 5545 §3.8.2, §3.8.5). EXDATE and RDATE additionally
+// carry a comma-separated list of values rather than a single one.
+const DATE_OR_DATE_TIME_PROPERTIES: &[&str] = &["DTSTART", "DTEND", "DUE", "RECURRENCE-ID"];
+const DATE_OR_DATE_TIME_LIST_PROPERTIES: &[&str] = &["EXDATE", "RDATE"];
+
+fn value_param(prop: &ContentLine) -> Option<String> {
+    prop.params
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case("VALUE"))
+        .and_then(|p| p.values.first())
+        .map(|v| v.to_uppercase())
+}
+
+fn validate_value_types(component: &Component, lenient: bool, diagnostics: &mut Vec<Diagnostic>) {
+    let severity = if lenient { Severity::Warning } else { Severity::Error };
+
+    for prop in &component.properties {
+        if DATE_TIME_ONLY_PROPERTIES.iter().any(|n| prop.name.eq_ignore_ascii_case(n)) {
+            check_value(prop, &prop.value, crate::value::validate_date_time, severity, diagnostics);
+        } else if DATE_OR_DATE_TIME_PROPERTIES.iter().any(|n| prop.name.eq_ignore_ascii_case(n)) {
+            check_date_or_date_time(prop, &prop.value, severity, diagnostics);
+        } else if DATE_OR_DATE_TIME_LIST_PROPERTIES.iter().any(|n| prop.name.eq_ignore_ascii_case(n)) {
+            for value in prop.value.split(',') {
+                check_date_or_date_time(prop, value, severity, diagnostics);
+            }
+        } else if prop.name.eq_ignore_ascii_case("DURATION") {
+            check_value(prop, &prop.value, crate::value::validate_duration, severity, diagnostics);
+        } else if prop.name.eq_ignore_ascii_case("TRIGGER") {
+            if value_param(prop).as_deref() == Some("DATE-TIME") {
+                check_value(prop, &prop.value, crate::value::validate_date_time, severity, diagnostics);
+            } else {
+                check_value(prop, &prop.value, crate::value::validate_duration, severity, diagnostics);
+            }
+        }
+    }
+
+    for child in &component.children {
+        validate_value_types(child, lenient, diagnostics);
+    }
+}
+
+fn check_date_or_date_time(prop: &ContentLine, value: &str, severity: Severity, diagnostics: &mut Vec<Diagnostic>) {
+    if value_param(prop).as_deref() == Some("DATE") {
+        check_value(prop, value, crate::value::validate_date, severity, diagnostics);
+    } else {
+        check_value(prop, value, crate::value::validate_date_time, severity, diagnostics);
+    }
+}
+
+fn check_value(
+    prop: &ContentLine,
+    value: &str,
+    validator: fn(&str) -> Result<(), String>,
+    severity: Severity,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Err(message) = validator(value) {
+        diagnostics.push(Diagnostic {
+            severity,
+            line: prop.source_line,
+            message: format!("property {}: {}", prop.name, message),
+        });
+    }
 }
 
 // Decode each TEXT property's value in place, from its RFC 5545 §3.3.11
@@ -362,6 +433,59 @@ mod tests {
         );
         let printed = crate::writer::print(&outcome.calendar);
         assert!(printed.contains("DESCRIPTION:line1\\nline2"));
+    }
+
+    #[test]
+    fn invalid_date_time_value_is_reported() {
+        let diagnostics = parse(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260230T090000Z\r\nDTSTART:20260101T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(diagnostics.iter().any(|d| d.message.contains("DTSTAMP") && d.message.contains("not a valid DATE-TIME")));
+    }
+
+    #[test]
+    fn dtstart_with_value_date_is_validated_as_date() {
+        let outcome = parse_ok(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260101T090000Z\r\nDTSTART;VALUE=DATE:20260101\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        assert!(outcome.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn exdate_list_values_are_each_validated() {
+        let diagnostics = parse(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260101T090000Z\r\nDTSTART:20260101T090000Z\r\nEXDATE:20260102T090000Z,not-a-date\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(diagnostics.iter().any(|d| d.message.contains("EXDATE")));
+    }
+
+    #[test]
+    fn invalid_duration_value_is_reported() {
+        let diagnostics = parse(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260101T090000Z\r\nDTSTART:20260101T090000Z\r\nDURATION:1H30M\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(diagnostics.iter().any(|d| d.message.contains("DURATION")));
+    }
+
+    #[test]
+    fn trigger_defaults_to_duration_but_switches_on_value_date_time() {
+        let outcome = parse_ok(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260101T090000Z\r\nDTSTART:20260101T090000Z\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        assert!(outcome.diagnostics.is_empty());
+
+        let diagnostics = parse(
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:1\r\nDTSTAMP:20260101T090000Z\r\nDTSTART:20260101T090000Z\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nTRIGGER;VALUE=DATE-TIME:not-a-date-time\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(diagnostics.iter().any(|d| d.message.contains("TRIGGER")));
     }
 
     #[test]

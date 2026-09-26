@@ -35,6 +35,13 @@ tool silently guessing what you meant.
   backslash followed by anything else is a strict-mode error and a
   lenient-mode warning. `src/text.rs` also exposes `unescape`/`escape` for
   decoding a value to its literal form and back.
+- Validates `DATE`, `DATE-TIME`, and `DURATION` value types: `DTSTAMP`,
+  `CREATED`, and `LAST-MODIFIED` must be `DATE-TIME`; `DTSTART`, `DTEND`,
+  `DUE`, `RECURRENCE-ID`, `EXDATE`, and `RDATE` are `DATE-TIME` by default
+  and switch to `DATE` under `;VALUE=DATE`; `DURATION` and `TRIGGER` (unless
+  tagged `;VALUE=DATE-TIME`) are checked against the RFC 5545 §3.3.6 duration
+  grammar. Calendar dates are checked against real month lengths, including
+  leap years. `src/value.rs` holds the format checks.
 - Pretty-prints the parsed result: uppercases component and parameter names,
   normalizes line endings to `CRLF`, and re-folds long lines at 75 octets.
 
@@ -90,18 +97,18 @@ output.
 ## Current scope
 
 This is an early skeleton. It handles structural parsing (folding,
-`BEGIN`/`END` nesting, parameters, `VCALENDAR`-level requirements) and
-`TEXT` escape validation correctly, but it does not yet validate property
-value types (`DATE-TIME`, `DURATION`, `RRULE`, ...), does not resolve `TZID`
-references against `VTIMEZONE` blocks, and the pretty printer passes
-property values through unchanged rather than round-tripping them through
-`text::unescape`/`text::escape`.
+`BEGIN`/`END` nesting, parameters, `VCALENDAR`-level requirements), `TEXT`
+escape validation, and `DATE`/`DATE-TIME`/`DURATION` value type checking,
+but it does not yet validate `RRULE` values, does not enforce
+component-specific required properties for `VEVENT`/`VTODO`/`VALARM`, and
+does not resolve `TZID` references against `VTIMEZONE` blocks.
 
 ## Layout
 
 - `src/parser.rs` — unfolding, content-line tokenizing, tree building,
   validation.
 - `src/text.rs` — RFC 5545 TEXT escaping (`unescape`/`escape`).
+- `src/value.rs` — RFC 5545 DATE/DATE-TIME/DURATION value type checks.
 - `src/writer.rs` — pretty printing and re-folding.
 - `src/lib.rs` — the shared `Component`/`ContentLine`/`Diagnostic` types.
 - `src/main.rs` — CLI glue.
